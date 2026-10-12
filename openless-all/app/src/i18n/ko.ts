@@ -1538,6 +1538,9 @@ export const ko: typeof zhCN = {
       audioRecordingMaxEntriesLabel: '원본 녹음 보관 개수',
       audioRecordingMaxEntriesDesc: '로컬 보관 wav 파일 상한. 빈칸 = 200.',
       startupGroupTitle: '시작',
+      lowMemoryBackgroundLabel: '저메모리 백그라운드 모드',
+      lowMemoryBackgroundDesc:
+        '재시작 후 적용됩니다. 메인 창을 닫으면 해제하고 녹음 시에만 네이티브 캡슐을 표시합니다. 대기 중 마이크 사전 실행을 끕니다. 로컬 모델 해제 설정은 유지됩니다.',
       startMinimizedLabel: '시작 시 메인 창 숨기기',
       startMinimizedDesc:
         '모든 시작 경로에서 메인 창을 열지 않고 메뉴 막대 / 트레이에서만 실행합니다.',

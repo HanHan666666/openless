@@ -1563,6 +1563,9 @@ export const en: typeof zhCN = {
       audioRecordingMaxEntriesLabel: 'Max raw recordings',
       audioRecordingMaxEntriesDesc: 'Max wav files retained locally. Blank = 200.',
       startupGroupTitle: 'Startup',
+      lowMemoryBackgroundLabel: 'Low-memory background mode',
+      lowMemoryBackgroundDesc:
+        'Applies after restart. Release the main window on close and show a native capsule on demand. Disable microphone prewarming while idle. Local models keep their existing release settings.',
       startMinimizedLabel: 'Start minimized (no main window)',
       startMinimizedDesc: 'No main window on any launch path — menu bar / tray only.',
       autoUpdateCheckLabel: 'Auto-check for updates',

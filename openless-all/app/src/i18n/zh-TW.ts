@@ -1485,6 +1485,9 @@ export const zhTW: typeof zhCN = {
       audioRecordingMaxEntriesLabel: '原始錄音保留條數',
       audioRecordingMaxEntriesDesc: '本地保留 wav 檔案數上限，留空 = 200。',
       startupGroupTitle: '啟動',
+      lowMemoryBackgroundLabel: '低記憶體背景模式',
+      lowMemoryBackgroundDesc:
+        '重新啟動後生效。關閉主介面時釋放視窗，錄音時按需顯示原生膠囊；閒置時關閉麥克風預熱。本機模型仍依原有設定釋放。',
       startMinimizedLabel: '啟動時靜默執行',
       startMinimizedDesc: '所有啟動路徑都不彈主視窗，僅選單欄 / 託盤執行。',
       autoUpdateCheckLabel: '自動檢查更新',

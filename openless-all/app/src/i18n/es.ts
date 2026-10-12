@@ -1587,6 +1587,9 @@ export const es: typeof zhCN = {
       audioRecordingMaxEntriesDesc:
         'Máximo de archivos WAV guardados en el dispositivo. Vacío = 200.',
       startupGroupTitle: 'Inicio',
+      lowMemoryBackgroundLabel: 'Modo de fondo con poca memoria',
+      lowMemoryBackgroundDesc:
+        'Se aplica al reiniciar. Libera la ventana principal al cerrarla y muestra la cápsula nativa cuando se necesita. Desactiva el precalentamiento del micrófono en reposo. Conserva la configuración de descarga de los modelos locales.',
       startMinimizedLabel: 'Iniciar minimizado (sin ventana principal)',
       startMinimizedDesc:
         'Al iniciar, solo se muestra la barra de menús o la bandeja del sistema, nunca la ventana principal.',

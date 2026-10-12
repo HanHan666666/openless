@@ -703,6 +703,17 @@ export function RecordingInputSection() {
       {showDesktopStartup && (
         <Collapsible title={t('settings.recording.startupGroupTitle')} defaultOpen>
           <AutostartRow />
+          <SettingRow
+            label={t('settings.recording.lowMemoryBackgroundLabel')}
+            desc={t('settings.recording.lowMemoryBackgroundDesc')}
+          >
+            <Toggle
+              on={prefs.lowMemoryBackgroundEnabled ?? false}
+              onToggle={(lowMemoryBackgroundEnabled) =>
+                savePrefs({ ...prefs, lowMemoryBackgroundEnabled })
+              }
+            />
+          </SettingRow>
           <SettingRow label={t('settings.recording.startMinimizedLabel')}>
             <Toggle on={prefs.startMinimized} onToggle={onStartMinimizedChange} />
           </SettingRow>

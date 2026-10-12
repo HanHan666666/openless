@@ -1608,6 +1608,9 @@ export const fr: typeof zhCN = {
       audioRecordingMaxEntriesDesc:
         'Nombre maximal de fichiers WAV conservés localement. Vide = 200.',
       startupGroupTitle: 'Démarrage',
+      lowMemoryBackgroundLabel: 'Mode arrière-plan économe en mémoire',
+      lowMemoryBackgroundDesc:
+        'Après redémarrage : libère la fenêtre principale à sa fermeture et affiche la capsule native à la demande. Désactive le préchauffage du microphone au repos. Conserve les réglages de libération des modèles locaux.',
       startMinimizedLabel: 'Démarrer réduit (sans fenêtre principale)',
       startMinimizedDesc:
         'Au lancement, seule la barre des menus ou la zone de notification est affichée, jamais la fenêtre principale.',
