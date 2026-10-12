@@ -137,7 +137,9 @@ core-graphics = "0.24"
 coreaudio-sys = "0.2"
 objc2 = { version = "0.5", features = ["exception"] }
 objc2-foundation = "0.2"
-objc2-app-kit = { version = "0.2", features = ["NSPanel"] }
+# 0.2.2 的 NSPanel feature 定义缺少结构体 cfg 所需的 NSResponder/NSWindow
+# （app workspace 靠 winit 的 feature union 掩盖了它，src-tauri 无 winit）。
+objc2-app-kit = { version = "0.2", features = ["NSPanel", "NSResponder", "NSWindow"] }
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
