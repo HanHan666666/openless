@@ -142,6 +142,7 @@ fn install_fonts(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result<()> {
+    platform::configure_early().map_err(eframe::Error::AppCreation)?;
     let (sender, incoming) = mpsc::sync_channel(2);
     let context = Arc::new(Mutex::new(None::<egui::Context>));
     let context_for_reader = Arc::clone(&context);

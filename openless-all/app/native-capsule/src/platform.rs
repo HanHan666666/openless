@@ -1,6 +1,12 @@
 //! Native window behavior, kept out of the shared capsule painter.
 use eframe::egui;
 
+pub fn configure_early() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    macos::prepare()?;
+    Ok(())
+}
+
 pub fn configure_window(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
     viewport
 }
@@ -45,56 +51,130 @@ pub fn configure_native(
     }
     #[cfg(target_os = "macos")]
     {
-        use objc2::{
-            msg_send,
-            runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel},
-            sel, ClassType,
-        };
-        use objc2_app_kit::NSPanel;
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        extern "C" {
-            fn object_setClass(object: *mut AnyObject, class: *const AnyClass) -> *const AnyClass;
-            fn class_getInstanceSize(class: *const AnyClass) -> usize;
-        }
-        unsafe extern "C" fn cannot_focus(_: &AnyObject, _: Sel) -> Bool {
-            Bool::NO
-        }
+        macos::restore_initializer();
         if let RawWindowHandle::AppKit(handle) = cc.window_handle()?.as_raw() {
-            unsafe {
-                let view = handle.ns_view.as_ptr() as *mut AnyObject;
-                let window: *mut AnyObject = msg_send![view, window];
-                let original: *const AnyClass = msg_send![window, class];
-                // Pinned winit 0.30's WinitWindow subclass has no ivars. Keep
-                // its allocated layout intact and reject an incompatible SDK
-                // rather than silently corrupting a larger NSPanel object.
-                let mut builder = ClassBuilder::new("OpenLessNativeCapsulePanel", NSPanel::class())
-                    .ok_or("native panel class already registered")?;
-                builder.add_method(
-                    sel!(canBecomeKeyWindow),
-                    cannot_focus as unsafe extern "C" fn(_, _) -> _,
-                );
-                builder.add_method(
-                    sel!(canBecomeMainWindow),
-                    cannot_focus as unsafe extern "C" fn(_, _) -> _,
-                );
-                let panel = builder.register();
-                if class_getInstanceSize(panel) > class_getInstanceSize(original) {
-                    return Err("NSPanel layout exceeds the native window allocation".into());
-                }
-                object_setClass(window, panel);
-                // NSWindowStyleMaskNonactivatingPanel, above menu-bar level,
-                // CanJoinAllSpaces | FullScreenAuxiliary.
-                let style: usize = msg_send![window, styleMask];
-                let _: () = msg_send![window, setStyleMask: style | (1 << 7)];
-                let _: () = msg_send![window, setLevel: 25isize];
-                let _: () = msg_send![window, setCollectionBehavior: (1usize << 0) | (1usize << 8)];
-                let _: () = msg_send![window, setHidesOnDeactivate: false];
-            }
+            unsafe { macos::configure(handle.ns_view.as_ptr().cast())? };
         }
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = cc;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Imp, Sel},
+        sel, ClassType,
+    };
+    use objc2_app_kit::{NSApplication, NSPanel, NSWindow};
+    use objc2_foundation::{MainThreadMarker, NSRect};
+    use std::sync::OnceLock;
+
+    type InitWindow =
+        unsafe extern "C" fn(*mut AnyObject, Sel, NSRect, usize, usize, Bool) -> *mut AnyObject;
+
+    struct Initializers {
+        window: InitWindow,
+        panel: InitWindow,
+        panel_class: &'static AnyClass,
+    }
+    static INITIALIZERS: OnceLock<Initializers> = OnceLock::new();
+
+    extern "C" {
+        fn object_setClass(object: *mut AnyObject, class: *const AnyClass) -> *const AnyClass;
+    }
+
+    unsafe extern "C" fn cannot_focus(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+
+    unsafe extern "C" fn init_window(
+        window: *mut AnyObject,
+        selector: Sel,
+        rect: NSRect,
+        style: usize,
+        backing: usize,
+        deferred: Bool,
+    ) -> *mut AnyObject {
+        let init = INITIALIZERS.get().expect("window initializer installed");
+        let original = (&*window).class();
+        // Winit 0.30's allocated subclass has no ivars. Convert before either
+        // NSWindow initialization or KVO registration, preserving AppKit's
+        // internal observers and the delegate's effectiveAppearance observer.
+        if original.name() == "WinitWindow"
+            && original.instance_size() == NSWindow::class().instance_size()
+            && original.instance_size() >= init.panel_class.instance_size()
+        {
+            object_setClass(window, init.panel_class);
+            (init.panel)(window, selector, rect, style | (1 << 7), backing, deferred)
+        } else {
+            (init.window)(window, selector, rect, style, backing, deferred)
+        }
+    }
+
+    pub(super) fn prepare() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mtm = MainThreadMarker::new().ok_or("capsule must start on the main thread")?;
+        unsafe {
+            let app = NSApplication::sharedApplication(mtm);
+            let _: Bool = msg_send![&*app, setActivationPolicy: 1isize];
+            let mut builder = ClassBuilder::new("OpenLessNativeCapsulePanel", NSPanel::class())
+                .ok_or("native panel class already registered")?;
+            builder.add_method(
+                sel!(canBecomeKeyWindow),
+                cannot_focus as unsafe extern "C" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(canBecomeMainWindow),
+                cannot_focus as unsafe extern "C" fn(_, _) -> _,
+            );
+            let selector = sel!(initWithContentRect:styleMask:backing:defer:);
+            let window = NSWindow::class()
+                .instance_method(selector)
+                .ok_or("NSWindow initializer missing")?;
+            let panel = NSPanel::class()
+                .instance_method(selector)
+                .ok_or("NSPanel initializer missing")?;
+            INITIALIZERS
+                .set(Initializers {
+                    window: std::mem::transmute::<Imp, InitWindow>(window.implementation()),
+                    panel: std::mem::transmute::<Imp, InitWindow>(panel.implementation()),
+                    panel_class: builder.register(),
+                })
+                .map_err(|_| "native panel initializer already installed")?;
+            // Only the disposable helper uses this temporary hook. It is
+            // removed as soon as eframe supplies the initialized native view.
+            window.set_implementation(std::mem::transmute::<InitWindow, Imp>(init_window));
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_initializer() {
+        if let Some(init) = INITIALIZERS.get() {
+            unsafe {
+                NSWindow::class()
+                    .instance_method(sel!(initWithContentRect:styleMask:backing:defer:))
+                    .unwrap()
+                    .set_implementation(std::mem::transmute::<InitWindow, Imp>(init.window));
+            }
+        }
+    }
+
+    pub(super) unsafe fn configure(
+        view: *mut AnyObject,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let window: *mut AnyObject = msg_send![view, window];
+        let panel: Bool = msg_send![window, isKindOfClass: NSPanel::class()];
+        if !panel.as_bool() {
+            return Err("winit window could not be initialized as a compatible NSPanel".into());
+        }
+        let _: () = msg_send![window, setLevel: 25isize];
+        let _: () = msg_send![window, setCollectionBehavior: (1usize << 0) | (1usize << 8)];
+        let _: () = msg_send![window, setHidesOnDeactivate: false];
+        Ok(())
+    }
 }
 
 pub fn place(window: &winit::window::Window, bounds: [i32; 4]) {

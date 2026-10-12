@@ -149,14 +149,19 @@ Siri 样式为鼠标穿透；Classic/Typeless 保留取消和确认。必须验�
 
 ### macOS
 
-辅助应用使用 Accessory 激活策略。胶囊配置为非激活 NSPanel，设置
+辅助程序的独立 Info.plist 以 `LSUIElement = true` 嵌入执行文件，启动前即声明
+无 Dock 图标的 agent 身份，入口及事件循环均使用 Accessory 激活策略。
+胶囊配置为非激活 NSPanel，设置
 `CanJoinAllSpaces` 和 `FullScreenAuxiliary`，显示和点击时不能把用户切回 OpenLess。
 AppKit 操作只发生在辅助进程主线程。
 
-当前 eframe/winit 没有直接创建 NSPanel 的公开入口，因此适配在窗口显示前改变
-Objective-C 类，原生窗口类没有额外实例变量；同时检查 NSPanel 实例大小不超过
-现有分配。此部分依赖固定 winit 版本和 SDK 行为，是需要维护者重点评审并真机
-验证的边界；尺寸检查不等于完整兼容性证明。升级 winit/SDK 后必须重新检查。
+当前 eframe/winit 没有直接创建 NSPanel 的公开入口，因此适配在 NSWindow
+初始化和 KVO 注册之前转换无实例变量的 WinitWindow，并调用真正的 NSPanel
+初始化函数；收到 CreationContext 后立即恢复原始初始化实现。检查原分配
+大小等于 NSWindow、且足以容纳 NSPanel，避免换类破坏已安装的观察者。
+此部分依赖固定 `winit 0.30.13` 和 SDK 行为，是需要维护者重点评审并真机验证
+的边界；尺寸检查不等于完整兼容性证明。升级后必须重新检查。修复设计及
+启动/退出回归见 [macos-native-capsule-fixes.md](macos-native-capsule-fixes.md)。
 
 不能凭 `always_on_top` 或交叉编译通过就声称全屏 Space 支持已验证。
 
@@ -250,7 +255,7 @@ phys_footprint 和相关 WebKit/辅助进程。系统缓存和分配器行为可
 | 前端 TypeScript 测试 | 54 个测试文件通过 | 使用 Node 的 tsx loader 执行，避开容器禁止 Unix socket 的 CLI 行为 |
 | 新增 Host 适配文件独立 Windows 类型检查 | 通过 | 使用真实 Tauri/Core/CPAL，既有 Coordinator 入口用 stub；不等同于完整 Host 编译 |
 | 完整 Windows Host 检查 | 未完成 | 既有 Foundry SDK 构建需下载 NuGet/微软原生依赖，容器连接被拒绝 |
-| macOS/Windows 真机及安装包 | 待本地验证 | 焦点、Space、多屏 DPI、签名、生命周期和内存结果尚无设备证据 |
+| macOS/Windows 真机及安装包 | macOS 基础启动/退出及后台快照已补；其余待验证 | macOS Space/点击焦点、多屏、Windows 真机及正式发行签名/公证仍缺证据 |
 
 现有前端 JavaScript 契约测试已执行至 TypeScript 阶段，没有观察到断言失败。
 原始完整测试入口最终受 tsx CLI 的 Unix socket 权限限制退出，因此不记录为
@@ -280,20 +285,25 @@ npm run tauri dev
 
 ### macOS 真机内存实测（2026-10-12，Apple Silicon，phys_footprint）
 
-同一台机器、相同版本与云端 ASR 配置下的四状态采样：
+同一台机器使用云端 ASR 的历史快照与修复后后台复核如下。各次窗口状态不同，
+这些记录不能替代相同窗口状态、相同编译配置下的 A/B 实验：
 
-| 状态 | 普通模式 | 低内存模式 |
+| 实际采样状态 | 总 phys_footprint | 证据边界 |
 | --- | --- | --- |
-| 空闲常驻（窗口全关 / 静默启动） | ≈310 MB | **≈60 MB**（冷启动静默 ≈45 MB） |
-| 听写进行中 | ≈310 MB | ≈255 MB（胶囊进程 192 MB，临时） |
-| 会话结束后 | ≈310 MB | ≈60 MB |
+| 普通模式，主窗口和识别状态开启 | ≈310 MB | 未测普通模式所有窗口关闭后的同状态对照 |
+| 低内存模式，冷启动静默 | ≈45 MB | 仅主进程 |
+| 低内存模式，听写胶囊开启 | ≈255 MB | 原生胶囊约 192 MB，为临时占用 |
+| 低内存模式，会话后所有窗口关闭 | ≈60 MB | 主进程约 55 MB，加 Networking 约 5 MB |
+| 含 macOS 胶囊修复的本地构建，所有窗口关闭 | **≈54 MB** | 主进程 48 MB，保守计入唯一 Networking 5.6 MB；无 WebContent/GPU/胶囊进程 |
 
-进程构成：普通模式空闲时 main/capsule/capsule-rail 三个隐藏 WebView 对应的
-4 个 WebKit XPC 服务共约 263 MB，主进程约 47 MB；低内存模式空闲时仅主进程
+进程构成：普通模式主窗口和识别状态开启时，4 个 WebKit XPC 服务共约 263 MB，
+主进程约 47 MB；低内存模式空闲时仅主进程
 （约 40–55 MB）外加一个约 5 MB 的 `com.apple.WebKit.Networking` 共享服务残留。
 胶囊进程听写期间约 192 MB，其中约 53 MB 为整体读入的 CJK 系统字体文件
 （PingFang 缺失时回退 STHeiti Medium.ttc）；Idle 后进程退出、内存随进程释放。
 
 已知边界：主进程会话后未完全回落到冷启动值（分配器高水位）；胶囊瞬时占用
-偏高，后续可通过字体子集化改进。以上为 macOS 数据；Windows 真机、安装包
-与签名路径仍待验证。
+偏高，后续可通过字体子集化改进。约 54 MB 的复核来自本地云端 ASR 测试 Host，
+其 MLX/Whisper Metal 编译选项与本 PR 默认配置不同，详见修复文档。这是关闭
+窗口后资源回收的快照，不能外推为所有构建的固定值或精确节省量。Windows
+真机、正式发行签名/公证和长时间连续听写仍待验证。
