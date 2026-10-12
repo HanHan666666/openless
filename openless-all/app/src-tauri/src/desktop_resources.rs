@@ -23,6 +23,12 @@ pub(crate) fn configure(context: &mut tauri::Context<tauri::Wry>, enabled: bool)
 pub(crate) struct MainWindowState {
     pub closing: bool,
     pub reopen_pending: bool,
+    /// Deferred destruction: the window is hidden at once, but kept alive for
+    /// a short grace period so an accidental close/reopen cycle preserves
+    /// unsaved form state. `(token, deadline)`; the token guards against a
+    /// second close resetting the deadline while the first timer is pending.
+    pub hide_grace: Option<(u64, std::time::Instant)>,
+    pub hide_grace_seq: u64,
     pub size: Option<tauri::PhysicalSize<u32>>,
     pub position: Option<tauri::PhysicalPosition<i32>>,
     pub maximized: bool,
@@ -68,6 +74,9 @@ pub(crate) fn ensure_main<R: tauri::Runtime>(
             state.reopen_pending = true;
             return Ok(None);
         }
+        // Reopening inside the grace window cancels the pending destroy; the
+        // hidden WebView is still alive, so drafts and scroll state survive.
+        state.hide_grace = None;
     }
     if let Some(window) = app.get_webview_window("main") {
         return Ok(Some(window));
@@ -108,6 +117,7 @@ pub(crate) fn close_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             return;
         }
         state.closing = true;
+        state.hide_grace = None;
         state.maximized = window.is_maximized().unwrap_or(false);
         // Keep the last normal bounds: reopening a maximized window must not
         // overwrite its restore size with the monitor's dimensions.
@@ -118,10 +128,51 @@ pub(crate) fn close_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
     if let Err(error) = window.destroy() {
         if let Some(lifecycle) = app.try_state::<MainWindowLifecycle>() {
-            lifecycle.lock().closing = false;
+            // The window survived: drop any reopen queued against the failed
+            // destroy, or it would resurface on the next successful one.
+            let mut state = lifecycle.lock();
+            state.closing = false;
+            state.reopen_pending = false;
         }
         log::warn!("[main] destroy failed: {error}");
     }
+}
+
+/// How long a low-memory close keeps the hidden WebView alive before the
+/// real destroy, so accidental close/reopen cycles lose nothing.
+#[cfg(not(mobile))]
+pub(crate) const MAIN_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(not(mobile))]
+pub(crate) fn hide_main_with_grace<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let token = if let Some(lifecycle) = app.try_state::<MainWindowLifecycle>() {
+        let mut state = lifecycle.lock();
+        if state.closing {
+            return;
+        }
+        state.hide_grace_seq += 1;
+        state.hide_grace = Some((state.hide_grace_seq, std::time::Instant::now() + MAIN_CLOSE_GRACE));
+        state.hide_grace_seq
+    } else {
+        0
+    };
+    let _ = window.hide();
+    let app_for_destroy = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(MAIN_CLOSE_GRACE).await;
+        let destroy = app_for_destroy
+            .try_state::<MainWindowLifecycle>()
+            .is_some_and(|lifecycle| {
+                matches!(lifecycle.lock().hide_grace, Some((pending, _)) if pending == token)
+            });
+        if destroy {
+            close_main(&app_for_destroy);
+        }
+    });
 }
 
 #[cfg(not(mobile))]

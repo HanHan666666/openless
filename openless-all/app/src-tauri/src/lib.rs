@@ -221,6 +221,7 @@ macro_rules! app_invoke_handler_desktop {
             desktop_resources::desktop_low_memory_active,
             native_capsule::native_capsule_set_locale,
             get_capsule_auxiliary_snapshot,
+            native_capsule_status,
             commands::get_capsule_snapshot,
             commands::get_settings,
             commands::get_settings_snapshot,
@@ -1613,10 +1614,26 @@ fn set_windows_caption_theme(app: AppHandle, dark: bool) {
 
 #[tauri::command]
 fn restart_app(app: AppHandle) {
+    // The main-thread restart path skips the RunEvent::Exit handlers; stop the
+    // disposable capsule explicitly. The child also self-closes when the
+    // inherited pipe hits EOF, so an exit here can never orphan it.
+    #[cfg(not(mobile))]
+    if let Some(coordinator) = app.try_state::<Arc<coordinator::Coordinator>>() {
+        coordinator.tauri_host().stop_native_capsule();
+    }
     prepare_for_restart();
     #[cfg(target_os = "macos")]
     reset_tcc_for_beta_restart();
-    app.restart();
+    restart_on_main_thread(app);
+}
+
+/// `AppHandle::restart` from a command thread routes through
+/// `ExitRequested { code: None }`, which the low-memory background policy
+/// deliberately prevents; hopping to the main thread takes tauri's direct
+/// spawn-and-exit path instead.
+fn restart_on_main_thread(app: AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || handle.restart());
 }
 
 #[tauri::command]
@@ -1905,7 +1922,9 @@ pub(crate) fn request_microphone_from_foreground<R: Runtime>(
 fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(not(mobile))]
     if desktop_resources::active() {
-        desktop_resources::close_main(app);
+        // Hide now, destroy after a short grace so accidental close/reopen
+        // cycles keep the WebView (and its form state) alive.
+        desktop_resources::hide_main_with_grace(app);
         let app_for_preview = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             if let Some(state) = app_for_preview.try_state::<commands::MicrophoneMonitorState>() {
@@ -4182,5 +4201,21 @@ fn get_capsule_auxiliary_snapshot(
     serde_json::json!({
         "suggestions": coord.backend().pending_corrections(),
         "fallback": coord.tauri_host().auxiliary_fallback_snapshot(),
+    })
+}
+
+/// Runtime health of the disposable native capsule, for the settings page:
+/// `active` mirrors the launch-time low-memory switch, `available` is false
+/// when the sidecar helper is missing or failed to initialize.
+#[cfg(not(mobile))]
+#[tauri::command]
+fn native_capsule_status(
+    coord: tauri::State<'_, Arc<coordinator::Coordinator>>,
+) -> serde_json::Value {
+    let (available, error) = coord.tauri_host().native_capsule_status();
+    serde_json::json!({
+        "active": crate::desktop_resources::active(),
+        "available": available,
+        "error": error,
     })
 }

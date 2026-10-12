@@ -1389,6 +1389,11 @@ pub(crate) struct TauriCoordinatorHost {
     capsule: Arc<CapsuleWindowState>,
     #[cfg(not(mobile))]
     native: Arc<Mutex<Option<Arc<crate::native_capsule::NativeCapsule>>>>,
+    /// Last sidecar init failure, surfaced by `native_capsule_status` so the
+    /// settings page can explain a missing recording overlay instead of
+    /// failing silently.
+    #[cfg(not(mobile))]
+    native_capsule_error: Arc<Mutex<Option<String>>>,
 }
 
 impl TauriCoordinatorHost {
@@ -1398,6 +1403,8 @@ impl TauriCoordinatorHost {
             capsule: Arc::new(CapsuleWindowState::default()),
             #[cfg(not(mobile))]
             native: Arc::new(Mutex::new(None)),
+            #[cfg(not(mobile))]
+            native_capsule_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1405,11 +1412,26 @@ impl TauriCoordinatorHost {
         #[cfg(not(mobile))]
         if crate::desktop_resources::active() {
             match crate::native_capsule::NativeCapsule::new(app.clone()) {
-                Ok(native) => *self.native.lock() = Some(Arc::new(native)),
-                Err(error) => log::error!("[native-capsule] {error}; dictation remains available"),
+                Ok(native) => {
+                    *self.native.lock() = Some(Arc::new(native));
+                    *self.native_capsule_error.lock() = None;
+                }
+                Err(error) => {
+                    log::error!("[native-capsule] {error}; dictation remains available");
+                    *self.native_capsule_error.lock() = Some(error.to_string());
+                }
             }
         }
         *self.app.lock() = Some(app);
+    }
+
+    /// `(available, last_error)` for the disposable capsule sidecar.
+    #[cfg(not(mobile))]
+    pub(crate) fn native_capsule_status(&self) -> (bool, Option<String>) {
+        (
+            self.native.lock().is_some(),
+            self.native_capsule_error.lock().clone(),
+        )
     }
 
     #[cfg(not(mobile))]

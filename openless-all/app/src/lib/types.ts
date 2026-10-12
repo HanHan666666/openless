@@ -340,6 +340,15 @@ export interface StylePackRuntimeDiagnostics {
   previewOmitsFrontApp: boolean;
 }
 
+/** Runtime health of the disposable native capsule sidecar (desktop only). */
+export interface NativeCapsuleStatus {
+  /** Whether the launch-time low-memory background switch is active. */
+  active: boolean;
+  /** False when the sidecar helper is missing or failed to initialize. */
+  available: boolean;
+  error: string | null;
+}
+
 export interface UserPreferences {
   hotkey: HotkeyBinding;
   dictationHotkey: ShortcutBinding;
