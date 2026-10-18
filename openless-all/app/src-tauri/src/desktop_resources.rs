@@ -1,5 +1,9 @@
 //! Desktop window policy is fixed at launch. Preference changes take effect
 //! after restart, so an in-flight session never changes renderer ownership.
+#[cfg(target_os = "macos")]
+#[path = "macos_card_panel.rs"]
+mod macos_card_panel;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 static LOW_MEMORY_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) fn active() -> bool {
@@ -155,7 +159,10 @@ pub(crate) fn hide_main_with_grace<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
             return;
         }
         state.hide_grace_seq += 1;
-        state.hide_grace = Some((state.hide_grace_seq, std::time::Instant::now() + MAIN_CLOSE_GRACE));
+        state.hide_grace = Some((
+            state.hide_grace_seq,
+            std::time::Instant::now() + MAIN_CLOSE_GRACE,
+        ));
         state.hide_grace_seq
     } else {
         0
@@ -207,57 +214,32 @@ pub(crate) fn ensure_card_window<R: tauri::Runtime>(
         .iter()
         .find(|window| window.label == "capsule")
         .ok_or(tauri::Error::WindowNotFound)?;
-    let window = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
     #[cfg(target_os = "macos")]
-    {
-        use objc2::{
-            msg_send,
-            runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel},
-            sel, ClassType,
-        };
-        use objc2_app_kit::NSPanel;
-        unsafe extern "C" fn cannot_focus(_: &AnyObject, _: Sel) -> Bool {
-            Bool::NO
-        }
-        extern "C" {
-            fn object_setClass(object: *mut AnyObject, class: *const AnyClass) -> *const AnyClass;
-            fn class_getInstanceSize(class: *const AnyClass) -> usize;
-        }
-        unsafe {
-            let panel = if let Some(class) = AnyClass::get("OpenLessAuxiliaryPanel") {
-                class
-            } else {
-                let mut builder = ClassBuilder::new("OpenLessAuxiliaryPanel", NSPanel::class())
-                    .expect("panel class registration runs only on the main thread");
-                builder.add_method(
-                    sel!(canBecomeKeyWindow),
-                    cannot_focus as unsafe extern "C" fn(_, _) -> _,
-                );
-                builder.add_method(
-                    sel!(canBecomeMainWindow),
-                    cannot_focus as unsafe extern "C" fn(_, _) -> _,
-                );
-                builder.register()
-            };
-            let raw = window.ns_window()? as *mut AnyObject;
-            let original: *const AnyClass = msg_send![raw, class];
-            if class_getInstanceSize(panel) > class_getInstanceSize(original) {
-                let _ = window.destroy();
-                return Err(tauri::Error::Anyhow(anyhow::anyhow!(
-                    "auxiliary panel exceeds native window allocation"
-                )));
-            }
-            object_setClass(raw, panel);
-            let style: usize = msg_send![raw, styleMask];
-            let _: () = msg_send![raw, setStyleMask: style | (1 << 7)];
-            let _: () = msg_send![raw, setLevel: 25isize];
-            let _: () = msg_send![raw, setCollectionBehavior: (1usize << 0) | (1usize << 8)];
-            let _: () = msg_send![raw, setHidesOnDeactivate: false];
-        }
-        // Do not put disposable panels in tauri-nspanel's retained registry:
-        // that registry has no removal API and would keep the content alive.
+    let initializer = macos_card_panel::CardInitializer::install()?;
+    let result =
+        tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build());
+    #[cfg(target_os = "macos")]
+    drop(initializer);
+    let window = result?;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = macos_card_panel::configure(&window) {
+        let _ = window.destroy();
+        return Err(error);
     }
     window.set_ignore_cursor_events(false)?;
+    Ok(())
+}
+
+/// Release disposable card content after every dismissal. Shared with the
+/// macOS lifecycle fixture so it exercises the production hide/destroy path.
+#[cfg(not(mobile))]
+pub(crate) fn hide_capsule_window<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> tauri::Result<()> {
+    window.hide()?;
+    if active() {
+        window.destroy()?;
+    }
     Ok(())
 }
 

@@ -972,14 +972,17 @@ impl TauriCapsuleWindow {
         self.stop_layout_watch();
         self.hide_transcript_overlay();
         if let Some(window) = self.window() {
-            window.hide()?;
             #[cfg(not(mobile))]
-            if crate::desktop_resources::active() {
-                self.state
-                    .hit_test_mode
-                    .store(HIT_TEST_MODE_CAPSULE, Ordering::SeqCst);
-                window.destroy()?;
+            {
+                if crate::desktop_resources::active() {
+                    self.state
+                        .hit_test_mode
+                        .store(HIT_TEST_MODE_CAPSULE, Ordering::SeqCst);
+                }
+                crate::desktop_resources::hide_capsule_window(&window)?;
             }
+            #[cfg(mobile)]
+            window.hide()?;
         }
         Ok(())
     }
