@@ -32,6 +32,7 @@ pub fn configure_native(
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows::Win32::{
             Foundation::HWND,
+            UI::Shell::SetWindowSubclass,
             UI::WindowsAndMessaging::{
                 GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW,
@@ -40,6 +41,9 @@ pub fn configure_native(
         if let RawWindowHandle::Win32(handle) = cc.window_handle()?.as_raw() {
             let window = HWND(handle.hwnd.get() as *mut _);
             unsafe {
+                if !SetWindowSubclass(window, Some(keep_overlay_style), 1, 0).as_bool() {
+                    return Err("cannot protect native capsule window styles".into());
+                }
                 let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
                 SetWindowLongPtrW(
                     window,
@@ -60,6 +64,38 @@ pub fn configure_native(
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = cc;
     Ok(())
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn keep_overlay_style(
+    window: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    id: usize,
+    _: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::{
+        Foundation::LRESULT,
+        UI::{
+            Shell::{DefSubclassProc, RemoveWindowSubclass},
+            WindowsAndMessaging::{
+                GWL_EXSTYLE, STYLESTRUCT, WM_NCDESTROY, WM_STYLECHANGING, WS_EX_APPWINDOW,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            },
+        },
+    };
+    if message == WM_STYLECHANGING && wparam.0 as i32 == GWL_EXSTYLE.0 {
+        // Winit rewrites extended styles on show/passthrough changes; retain the overlay contract.
+        let styles = &mut *(lparam.0 as *mut STYLESTRUCT);
+        styles.styleNew =
+            (styles.styleNew | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
+        return LRESULT(0);
+    }
+    if message == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(window, Some(keep_overlay_style), id);
+    }
+    DefSubclassProc(window, message, wparam, lparam)
 }
 
 #[cfg(target_os = "macos")]

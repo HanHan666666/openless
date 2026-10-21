@@ -1,6 +1,6 @@
 //! Construct disposable Tauri cards as NSPanels before AppKit installs KVO.
 //!
-//! Tao 0.35.3 allocates TaoWindow (NSWindow + one `focusable` ivar). Replacing
+//! Tao 0.37.1 allocates TaoWindow (NSWindow + one `focusable` ivar). Replacing
 //! its class after initialization loses AppKit's observation state and aborts
 //! when the card is destroyed. Keep Tao's layout/sendEvent implementation, but
 //! run NSPanel's initializer before the window, delegate or WebView is set up.

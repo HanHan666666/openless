@@ -52,7 +52,7 @@ pub fn draw_icon(ui: &egui::Ui, center: egui::Pos2, icon: IconName, color: egui:
         return;
     };
     let ctx = ui.ctx();
-    let id = egui::Id::new(("lucide-icon", name));
+    let id = egui::Id::unique(("lucide-icon", name));
     let texture = ctx
         .data(|data| data.get_temp::<egui::TextureHandle>(id))
         .or_else(|| {

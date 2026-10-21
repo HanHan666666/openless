@@ -221,11 +221,12 @@ pub(crate) fn persist_strict_settings(
 #[cfg(target_os = "windows")]
 fn sync_low_latency_capture_preferences(prefs: &UserPreferences) {
     crate::recorder::warm_capture_hub().configure(
-        prefs.low_latency_dictation_enabled
-            && !prefs.low_memory_background_enabled
-            && !crate::desktop_resources::active(),
+        prefs.low_latency_dictation_enabled && !crate::desktop_resources::active(),
         (!prefs.microphone_device_name.trim().is_empty())
             .then(|| prefs.microphone_device_name.clone()),
+        openless_core::AudioProcessingConfig {
+            enhancement_enabled: prefs.audio_enhancement_enabled,
+        },
     );
 }
 
@@ -799,8 +800,10 @@ pub(crate) fn replace_dictation_hotkey(
 ) -> Result<(), String> {
     let _host_guard = coord.lock_settings_host();
     let mut prefs = coord.backend().get_preferences();
-    crate::shortcut_binding::validate_binding(&binding).map_err(|error| error.to_string())?;
-    reject_bare_shift_dictation_shortcut(&binding)?;
+    if !binding.is_unassigned() {
+        crate::shortcut_binding::validate_binding(&binding).map_err(|error| error.to_string())?;
+        reject_bare_shift_dictation_shortcut(&binding)?;
+    }
     #[cfg(target_os = "macos")]
     {
         let native = crate::macos_dictation_key::PRIMARY;

@@ -5,6 +5,7 @@ members = [
     "linux-egui",
     "crates/openless-capsule",
     "native-capsule",
+    "harmony/rust",
 ]
 exclude = [
     "src-tauri",

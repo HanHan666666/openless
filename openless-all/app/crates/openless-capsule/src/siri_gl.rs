@@ -128,7 +128,7 @@ pub struct SiriClock {
 
 /// Advance one call site's clock by `dt` (seconds).
 pub fn tick(ctx: &egui::Context, id: &str, drive: SiriDrive, dt: f32) -> SiriClock {
-    let key = egui::Id::new(("openless-siri-clock", id));
+    let key = egui::Id::unique(("openless-siri-clock", id));
     let dt = dt.clamp(0.0, 0.05);
     let mut clock = ctx.data_mut(|data| {
         data.get_temp::<SiriClock>(key).unwrap_or(SiriClock {
@@ -192,7 +192,8 @@ pub fn paint(ui: &egui::Ui, rect: egui::Rect, glow: SiriGlow) -> bool {
                 let points = (0..=48)
                     .map(|step| {
                         let t = step as f32 / 48.0;
-                        let envelope = (std::f32::consts::PI * t).sin().powf(0.7);
+                        // f32 sin(PI) can be slightly negative; fractional powers would produce NaN.
+                        let envelope = (std::f32::consts::PI * t).sin().max(0.0).powf(0.7);
                         let y = center_y
                             + (glow.time * 2.1 + t * 10.0 + phase).sin() * amplitude * envelope;
                         egui::pos2(rect.left() + rect.width() * t, y)
@@ -292,6 +293,16 @@ mod tests {
             callbacks, 0,
             "the shader path is off: nothing may queue a GPU callback"
         );
+        let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+        assert!(!primitives.is_empty());
+        for primitive in primitives {
+            if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
+                assert!(
+                    mesh.vertices.iter().all(|vertex| vertex.pos.is_finite()),
+                    "all wave endpoints must tessellate to finite vertices"
+                );
+            }
+        }
     }
 
     #[test]

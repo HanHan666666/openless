@@ -171,14 +171,16 @@ pub(crate) fn hide_main_with_grace<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
     let app_for_destroy = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(MAIN_CLOSE_GRACE).await;
-        let destroy = app_for_destroy
-            .try_state::<MainWindowLifecycle>()
-            .is_some_and(|lifecycle| {
+        let app_for_main = app_for_destroy.clone();
+        let _ = app_for_destroy.run_on_main_thread(move || {
+            // Recheck after dispatch: reopening must cancel even an already-fired timer.
+            let destroy = app_for_main.try_state::<MainWindowLifecycle>().is_some_and(|lifecycle| {
                 matches!(lifecycle.lock().hide_grace, Some((pending, _)) if pending == token)
             });
-        if destroy {
-            close_main(&app_for_destroy);
-        }
+            if destroy {
+                close_main(&app_for_main);
+            }
+        });
     });
 }
 

@@ -1,20 +1,34 @@
 //! Adapter from the existing coherent capsule snapshot to a disposable egui UI.
-use crate::types::{CapsulePayload, CapsuleState, CapsuleStyle};
+use crate::capsule_mirrors::{self, MonitorRect};
+use crate::types::{CapsuleDisplayMode, CapsulePayload, CapsuleState, CapsuleStyle};
 use openless_capsule::{
     supervisor::CapsuleSupervisor, Action, CapsuleLabels, CapsulePopupState, Frame,
 };
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+#[derive(Default)]
+struct Presentation {
+    frame: Option<Frame>,
+    mode: CapsuleDisplayMode,
+    bounds: Vec<Option<[i32; 4]>>,
+    foreground: Option<MonitorRect>,
+    foreground_captured: bool,
+}
 
 pub(crate) struct NativeCapsule {
-    supervisor: CapsuleSupervisor,
+    executable: std::path::PathBuf,
+    on_action: Arc<dyn Fn(String, Action) + Send + Sync>,
+    on_health_change: Arc<dyn Fn() + Send + Sync>,
+    supervisors: parking_lot::Mutex<Vec<CapsuleSupervisor>>,
     app: tauri::AppHandle,
     locale: parking_lot::Mutex<String>,
-    latest: parking_lot::Mutex<Option<Frame>>,
+    latest: parking_lot::Mutex<Presentation>,
     position_pending: AtomicBool,
+    layout_epoch: AtomicU64,
 }
 impl NativeCapsule {
     pub(crate) fn new(app: tauri::AppHandle) -> Result<Self, String> {
@@ -38,34 +52,44 @@ impl NativeCapsule {
             ));
         }
         let app_for_action = app.clone();
-        let action = Arc::new(move |session_id: String, action: Action| {
-            let app = app_for_action.clone();
-            tauri::async_runtime::spawn(async move {
-                let coordinator = app.state::<Arc<crate::coordinator::Coordinator>>();
-                let backend = coordinator.backend();
-                // Recheck Core ownership after the process/async hop. A delayed
-                // action can never operate on a newly started dictation.
-                let snapshot = backend.snapshot().dictation;
-                if snapshot.session_id.map(|id| id.to_string()).as_deref()
-                    != Some(session_id.as_str())
-                {
-                    return;
-                }
-                match action {
-                    Action::Cancel => {
-                        coordinator.cancel_active_voice().await;
-                    }
-                    Action::Confirm
-                        if snapshot.phase == openless_core::DictationPhase::Recording =>
+        let action: Arc<dyn Fn(String, Action) + Send + Sync> =
+            Arc::new(move |session_id: String, action: Action| {
+                let app = app_for_action.clone();
+                tauri::async_runtime::spawn(async move {
+                    let coordinator = app.state::<Arc<crate::coordinator::Coordinator>>();
+                    let backend = coordinator.backend();
+                    // Recheck Core ownership after the process/async hop. A delayed
+                    // action can never operate on a newly started dictation.
+                    let snapshot = backend.snapshot().dictation;
+                    if snapshot.session_id.map(|id| id.to_string()).as_deref()
+                        != Some(session_id.as_str())
                     {
-                        let _ = backend.stop_dictation().await;
+                        return;
                     }
-                    _ => {}
-                }
+                    match action {
+                        Action::Cancel => {
+                            coordinator.cancel_active_voice().await;
+                        }
+                        Action::Confirm
+                            if snapshot.phase == openless_core::DictationPhase::Recording =>
+                        {
+                            let _ = backend.stop_dictation().await;
+                        }
+                        _ => {}
+                    }
+                });
             });
-        });
         let handle = tauri::async_runtime::handle().inner().clone();
-        let supervisor = CapsuleSupervisor::spawn(&handle, path, action);
+        let health_app = app.clone();
+        let on_health_change: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = health_app.emit("native-capsule:health-changed", ());
+        });
+        let supervisor = CapsuleSupervisor::spawn(
+            &handle,
+            path.clone(),
+            Arc::clone(&action),
+            Arc::clone(&on_health_change),
+        );
         let saved_locale = app
             .path()
             .app_config_dir()
@@ -75,20 +99,45 @@ impl NativeCapsule {
             .unwrap_or_else(|| std::env::var("LANG").unwrap_or_else(|_| "en".into()))
             .replace('_', "-");
         Ok(Self {
-            supervisor,
+            executable: path,
+            on_action: action,
+            on_health_change,
+            supervisors: parking_lot::Mutex::new(vec![supervisor]),
             app,
             locale: parking_lot::Mutex::new(locale),
-            latest: parking_lot::Mutex::new(None),
+            latest: parking_lot::Mutex::new(Presentation::default()),
             position_pending: AtomicBool::new(false),
+            layout_epoch: AtomicU64::new(0),
         })
     }
     pub(crate) fn set_locale(&self, locale: String) {
         *self.locale.lock() = locale;
     }
+    pub(crate) fn update_transcript(&self, session_id: &str, text: String) {
+        let coordinator = self.app.state::<Arc<crate::coordinator::Coordinator>>();
+        let enabled = coordinator
+            .backend()
+            .get_preferences()
+            .capsule_transcript_enabled;
+        let mut latest = self.latest.lock();
+        if let Some(frame) = latest.frame.as_mut() {
+            if frame.update_transcript(session_id, if enabled { text } else { String::new() }) {
+                self.send_frames(&latest);
+            }
+        }
+    }
+    pub(crate) fn last_error(&self) -> Option<String> {
+        self.supervisors
+            .lock()
+            .iter()
+            .find_map(CapsuleSupervisor::last_error)
+    }
     pub(crate) fn stop(&self) {
-        self.latest.lock().take();
-        self.position_pending.store(false, Ordering::Relaxed);
-        self.supervisor.stop();
+        *self.latest.lock() = Presentation::default();
+        self.layout_epoch.fetch_add(1, Ordering::Relaxed);
+        for supervisor in self.supervisors.lock().iter() {
+            supervisor.stop();
+        }
     }
     pub(crate) fn present(
         self: &Arc<Self>,
@@ -111,7 +160,10 @@ impl NativeCapsule {
             CapsuleState::Cancelled => "cancelled",
             CapsuleState::Error => "failed",
         };
-        let interactive = coordinator
+        let interactive = matches!(
+            payload.state,
+            CapsuleState::Recording | CapsuleState::Transcribing | CapsuleState::Polishing
+        ) && coordinator
             .backend()
             .snapshot()
             .dictation
@@ -151,76 +203,152 @@ impl NativeCapsule {
             self.stop();
             return;
         }
-        let session_id = frame.session_id.clone();
+        let mode = crate::tauri_coordinator_host::normalized_display_mode(
+            preferences.capsule_display_mode,
+        );
         let mut latest = self.latest.lock();
-        let needs_position = latest
-            .as_ref()
-            .is_none_or(|previous| previous.session_id != session_id);
-        let mut frame = frame;
-        if !needs_position {
-            frame.bounds = latest.as_ref().and_then(|previous| previous.bounds);
+        let was_idle = latest.frame.is_none();
+        let needs_position = latest.mode != mode
+            || latest.frame.as_ref().is_none_or(|previous| {
+                previous.session_id != frame.session_id
+                    || (frame.state.phase == "recording" && previous.state.phase != "recording")
+            });
+        if needs_position {
+            latest.bounds.clear();
+            latest.foreground = None;
+            latest.foreground_captured = false;
         }
-        *latest = Some(frame.clone());
+        latest.mode = mode;
+        latest.frame = Some(frame);
+        if !latest.bounds.is_empty() {
+            self.send_frames(&latest);
+        }
         drop(latest);
         if needs_position {
-            self.position_pending.store(true, Ordering::Relaxed);
+            self.request_layout();
+        }
+        if was_idle {
+            let epoch = self.layout_epoch.fetch_add(1, Ordering::Relaxed) + 1;
             let native = Arc::clone(self);
-            // Monitor/window APIs stay on the main thread. First-frame volume
-            // updates are coalesced in `latest` until position is available.
-            if let Err(error) = self.app.run_on_main_thread(move || {
-                let bounds = target_bounds(&native.app);
-                let mut latest = native.latest.lock();
-                if let Some(frame) = latest
-                    .as_mut()
-                    .filter(|frame| frame.session_id == session_id)
-                {
-                    frame.bounds = bounds;
-                    native.position_pending.store(false, Ordering::Relaxed);
-                    native.supervisor.present(frame.clone());
+            // Continue following pointer/topology changes after microphone frames stop.
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if native.layout_epoch.load(Ordering::Relaxed) != epoch {
+                        break;
+                    }
+                    native.request_layout();
                 }
-            }) {
-                log::warn!("[native-capsule] monitor placement failed: {error}");
-                self.position_pending.store(false, Ordering::Relaxed);
-                if let Some(frame) = self.latest.lock().as_ref() {
-                    self.supervisor.present(frame.clone());
-                }
-            }
-        } else if !self.position_pending.load(Ordering::Relaxed) {
-            self.supervisor.present(frame);
+            });
         }
     }
-}
 
-fn target_bounds(app: &tauri::AppHandle) -> Option<[i32; 4]> {
-    // Host APIs are used without constructing a hidden WebView just to discover
-    // a monitor. Pointer monitor is the existing macOS capsule policy.
-    #[cfg(windows)]
-    if let Some(monitor) = crate::foreground_window_monitor() {
-        let width = (460.0 * monitor.scale).round() as i32;
-        let height = (158.0 * monitor.scale).round() as i32;
-        return Some([
-            monitor.work_left + (monitor.work_right - monitor.work_left - width) / 2,
-            monitor.work_bottom - height - (12.0 * monitor.scale) as i32,
-            width,
-            height,
-        ]);
+    fn request_layout(self: &Arc<Self>) {
+        if self.position_pending.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let native = Arc::clone(self);
+        if let Err(error) = self.app.run_on_main_thread(move || {
+            native.refresh_layout();
+            native.position_pending.store(false, Ordering::Relaxed);
+        }) {
+            self.position_pending.store(false, Ordering::Relaxed);
+            log::warn!("[native-capsule] monitor placement failed: {error}");
+        }
     }
-    let point = app.cursor_position().ok()?;
-    let monitor = app
-        .monitor_from_point(point.x, point.y)
-        .ok()
-        .flatten()
-        .or_else(|| app.primary_monitor().ok().flatten())?;
-    let area = monitor.work_area();
-    let scale = monitor.scale_factor();
-    let width = (460.0 * scale).round() as i32;
-    let height = (158.0 * scale).round() as i32;
-    Some([
-        area.position.x + (area.size.width as i32 - width) / 2,
-        area.position.y + area.size.height as i32 - height - (12.0 * scale) as i32,
-        width,
-        height,
-    ])
+
+    fn refresh_layout(&self) {
+        let mut latest = self.latest.lock();
+        if latest.frame.is_none() {
+            return;
+        }
+        let coordinator = self.app.state::<Arc<crate::coordinator::Coordinator>>();
+        let mode = crate::tauri_coordinator_host::normalized_display_mode(
+            coordinator.backend().get_preferences().capsule_display_mode,
+        );
+        if latest.mode != mode {
+            latest.mode = mode;
+            latest.foreground = None;
+            latest.foreground_captured = false;
+        }
+        let monitors: Vec<_> = self
+            .app
+            .available_monitors()
+            .unwrap_or_default()
+            .iter()
+            .map(MonitorRect::from_tauri)
+            .collect();
+        let primary = self
+            .app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .as_ref()
+            .map(MonitorRect::from_tauri);
+        let cursor = self
+            .app
+            .cursor_position()
+            .ok()
+            .map(|point| (point.x as i32, point.y as i32));
+        #[cfg(windows)]
+        if latest.mode == CapsuleDisplayMode::ForegroundWindowScreen
+            && !latest.foreground_captured
+            && latest
+                .frame
+                .as_ref()
+                .is_some_and(|frame| frame.state.phase == "recording")
+        {
+            latest.foreground = coordinator
+                .tauri_host()
+                .capsule_window()
+                .and_then(|capsule| capsule.capture_foreground_monitor());
+            latest.foreground_captured = true;
+        }
+        latest.bounds = capsule_mirrors::display_targets(
+            latest.mode,
+            &monitors,
+            primary,
+            cursor,
+            latest.foreground,
+        )
+        .into_iter()
+        .map(|monitor| {
+            let (width, height, x, y) =
+                capsule_mirrors::capsule_placement(460.0, 158.0, 12.0, monitor);
+            Some([x, y, width as i32, height as i32])
+        })
+        .collect();
+        if latest.bounds.is_empty() {
+            latest.bounds.push(None);
+        }
+        self.send_frames(&latest);
+    }
+
+    fn send_frames(&self, presentation: &Presentation) {
+        let Some(frame) = &presentation.frame else {
+            return;
+        };
+        let mut supervisors = self.supervisors.lock();
+        // The same bounded mirror policy is used by regular WebView capsules.
+        let previous_error = supervisors.iter().find_map(CapsuleSupervisor::last_error);
+        supervisors.truncate(presentation.bounds.len());
+        if previous_error != supervisors.iter().find_map(CapsuleSupervisor::last_error) {
+            (self.on_health_change)();
+        }
+        while supervisors.len() < presentation.bounds.len() {
+            supervisors.push(CapsuleSupervisor::spawn(
+                tauri::async_runtime::handle().inner(),
+                self.executable.clone(),
+                Arc::clone(&self.on_action),
+                Arc::clone(&self.on_health_change),
+            ));
+        }
+        for (supervisor, bounds) in supervisors.iter().zip(&presentation.bounds) {
+            let mut frame = frame.clone();
+            frame.bounds = *bounds;
+            supervisor.present(frame);
+        }
+    }
 }
 
 #[tauri::command]

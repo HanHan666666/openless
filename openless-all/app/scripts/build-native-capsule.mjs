@@ -1,5 +1,5 @@
-// Build a separate graphics executable: the Tauri host keeps its Rust 1.88
-// dependency graph and never links egui/eframe. Native UI requires Rust 1.95+.
+// Build a separate graphics executable: the Tauri host keeps its UI-independent
+// dependency graph and never links egui/eframe. Both executables use the project Rust toolchain.
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -35,7 +35,10 @@ mkdirSync(binaries, { recursive: true });
 // Tauri's externalBin convention uses a target-suffixed source filename.
 copyFileSync(source, resolve(binaries, `openless-native-capsule-${target}${suffix}`));
 // Raw cargo/tauri dev launches also discover the helper next to the host.
-const hostOutput = resolve(root, 'src-tauri/target', profile);
-mkdirSync(hostOutput, { recursive: true });
-copyFileSync(source, resolve(hostOutput, name));
+const hostTarget = process.env.CARGO_TARGET_DIR ? targetRoot : resolve(root, 'src-tauri/target');
+for (const hostOutput of [resolve(hostTarget, profile), resolve(hostTarget, target, profile)]) {
+  mkdirSync(hostOutput, { recursive: true });
+  const destination = resolve(hostOutput, name);
+  if (source !== destination) copyFileSync(source, destination);
+}
 console.log(`[native-capsule] prepared ${target} ${profile} helper`);

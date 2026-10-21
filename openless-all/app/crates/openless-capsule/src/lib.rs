@@ -111,6 +111,18 @@ impl Frame {
     pub fn visible(&self) -> bool {
         self.state.phase != "idle"
     }
+    pub fn update_transcript(&mut self, session_id: &str, text: String) -> bool {
+        if self.session_id != session_id
+            || !matches!(
+                self.state.phase.as_str(),
+                "recording" | "transcribing" | "polishing"
+            )
+        {
+            return false;
+        }
+        self.transcript = text;
+        true
+    }
     pub fn accepts(&self, session_id: &str, sequence: u64, action: Action) -> bool {
         self.interactive
             && self.session_id == session_id
@@ -226,6 +238,17 @@ mod tests {
         assert!(!frame.accepts("new", 42, Action::Confirm));
         frame.state.phase = "completed".into();
         assert!(!frame.accepts("new", 42, Action::Cancel));
+    }
+    #[test]
+    fn transcript_updates_without_volume_frames_but_never_crosses_sessions_or_terminal_states() {
+        let mut frame = frame();
+        frame.state.phase = "transcribing".into();
+        assert!(frame.update_transcript("new", "latest text".into()));
+        assert!(!frame.update_transcript("old", "stale text".into()));
+        assert_eq!(frame.transcript, "latest text");
+        frame.state.phase = "completed".into();
+        assert!(!frame.update_transcript("new", "late text".into()));
+        assert_eq!(frame.transcript, "latest text");
     }
     #[test]
     fn jsonl_rejects_oversized_or_unterminated_frames() {

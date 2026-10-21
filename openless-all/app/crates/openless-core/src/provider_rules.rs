@@ -47,6 +47,9 @@ const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[
     ("foundry-local-whisper", "asrFoundryLocalWhisper"),
     ("local-whisper", "asrLocalWhisper"),
     ("sherpa-onnx-local", "asrSherpaOnnxLocal"),
+    ("experimental-textstream", "asrExperimentalTextStream"),
+    ("experimental-sensevoice", "asrExperimentalSenseVoice"),
+    ("experimental-embedding-gemma", "asrExperimentalGemma"),
     ("local-qwen3-mlx", "asrLocalQwen3Mlx"),
     ("local-qwen3-c", "asrLocalQwen3C"),
     ("local-qwen3", "asrLocalQwen3"),
@@ -111,7 +114,10 @@ const DASHSCOPE_MODELS: &[&str] = &[
     crate::asr::dashscope_multimodal::QWEN_AUDIO_MODEL,
     crate::asr::dashscope_multimodal::DEFAULT_MODEL,
 ];
-const GEMINI_MODELS: &[&str] = &[crate::asr::gemini::DEFAULT_MODEL];
+const GEMINI_MODELS: &[&str] = &[
+    crate::asr::gemini::DEFAULT_MODEL,
+    crate::asr::gemini_live::MODEL,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,7 +138,7 @@ pub enum ValidationProbe {
     Unsupported,
     AsrSilence,
     AsrSilenceAllowsNoFinal,
-    /// Local engine probe (Apple Speech): the host injects its native
+    /// System recognition probe (Apple Speech): the host injects its native
     /// transcription engine and validation runs the same silence WAV through it,
     /// exercising authorization and recognizer availability for real.
     AsrNativeSilence,
@@ -225,18 +231,21 @@ fn provider_descriptor_with_label(
     let provider_type = ProviderType::new(provider_type).ok()?;
     let id = provider_type.as_str().to_string();
     let (default_endpoint, default_model, auth_requirement, validation_probe) = match kind {
-        ProviderKind::Asr if is_local_asr_provider(&id) => (
+        // Apple Speech is an OS recognition service, not a downloadable model runtime.
+        ProviderKind::Asr if id == "apple-speech" => (
             None,
             None,
             AuthRequirement::None,
-            // Apple Speech starts instantly and needs no download, so its card
-            // can run a real validation probe; download-based local engines stay
-            // unverifiable here and report readiness from the local model page.
-            if id == "apple-speech" {
-                ValidationProbe::AsrNativeSilence
-            } else {
-                ValidationProbe::Unsupported
-            },
+            ValidationProbe::AsrNativeSilence,
+        ),
+        ProviderKind::Asr if is_local_asr_provider(&id) => (
+            None,
+            crate::experimental_asr::ExperimentalAsrModel::from_provider(&id).map(|m| m.model_id()),
+            AuthRequirement::None,
+            // No local descriptor may silently initialize inference through
+            // the generic credentials probe. Legacy IDs are metadata only;
+            // experimental readiness belongs to the explicit opt-in service.
+            ValidationProbe::Unsupported,
         ),
         ProviderKind::Asr => (
             default_asr_endpoint(&id),
@@ -345,10 +354,12 @@ fn is_local_asr_provider(provider_type: &str) -> bool {
         "foundry-local-whisper"
             | "local-whisper"
             | "sherpa-onnx-local"
+            | "experimental-textstream"
+            | "experimental-sensevoice"
+            | "experimental-embedding-gemma"
             | "local-qwen3-mlx"
             | "local-qwen3-c"
             | "local-qwen3"
-            | "apple-speech"
     )
 }
 
@@ -578,6 +589,10 @@ pub fn default_asr_endpoint(provider_type: &str) -> Option<&'static str> {
 }
 
 pub fn default_asr_model(provider_type: &str) -> Option<&'static str> {
+    if let Some(model) = crate::experimental_asr::ExperimentalAsrModel::from_provider(provider_type)
+    {
+        return Some(model.model_id());
+    }
     match provider_type {
         "elevenlabs" => Some(crate::asr::elevenlabs::DEFAULT_MODEL),
         "bailian" => Some(crate::asr::bailian::DEFAULT_MODEL),
@@ -772,13 +787,13 @@ pub fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
 }
 
 pub fn validate_gemini_asr_model(model: &str) -> Result<(), String> {
-    if model.trim().is_empty() || model.trim() == crate::asr::gemini::DEFAULT_MODEL {
+    if model.trim().is_empty() || GEMINI_MODELS.contains(&model.trim()) {
         Ok(())
     } else {
         Err(format!(
             "不支持的 Gemini ASR 模型：{}。当前仅支持 {}",
             model.trim(),
-            crate::asr::gemini::DEFAULT_MODEL
+            GEMINI_MODELS.join("、")
         ))
     }
 }
@@ -1468,7 +1483,10 @@ mod tests {
         );
         assert_eq!(
             descriptor.static_models,
-            vec![crate::asr::gemini::DEFAULT_MODEL.to_string()]
+            vec![
+                crate::asr::gemini::DEFAULT_MODEL.to_string(),
+                crate::asr::gemini_live::MODEL.to_string(),
+            ]
         );
         assert_eq!(descriptor.auth_requirement, AuthRequirement::ApiKey);
         assert_eq!(
@@ -1479,7 +1497,12 @@ mod tests {
             resolve_effective_asr_provider("gemini", ""),
             Ok("gemini".to_string())
         );
-        assert!(resolve_effective_asr_provider("gemini", "gemini-3.5-transcribe-live").is_err());
+        for model in GEMINI_MODELS {
+            assert_eq!(
+                resolve_effective_asr_provider("gemini", &format!(" {model} ")),
+                Ok("gemini".to_string())
+            );
+        }
         assert!(resolve_effective_asr_provider("gemini", "unknown").is_err());
     }
 
@@ -1580,11 +1603,19 @@ mod tests {
     }
 
     #[test]
-    fn apple_speech_probes_natively_while_download_engines_stay_unsupported() {
+    fn retired_and_experimental_models_never_probe_inference_through_credentials() {
         let apple = provider_descriptor(ProviderKind::Asr, "apple-speech").unwrap();
         assert_eq!(apple.validation_probe, ValidationProbe::AsrNativeSilence);
+        assert!(apple.default_model.is_none());
         assert_eq!(apple.auth_requirement, AuthRequirement::None);
-        for provider in ["local-whisper", "local-qwen3", "sherpa-onnx-local"] {
+        for provider in [
+            "local-whisper",
+            "local-qwen3",
+            "sherpa-onnx-local",
+            "experimental-textstream",
+            "experimental-sensevoice",
+            "experimental-embedding-gemma",
+        ] {
             assert_eq!(
                 provider_descriptor(ProviderKind::Asr, provider)
                     .unwrap()

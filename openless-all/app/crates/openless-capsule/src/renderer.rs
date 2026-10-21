@@ -1,4 +1,4 @@
-//! Capsule renderer extracted from the Linux frontend; all hosts share this code.
+//! Disposable desktop capsule renderer, based on the Linux frontend.
 use super::{icons, layout, siri_gl, theme};
 use crate::{CapsuleLabels, CapsulePopupState};
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,7 +145,7 @@ pub fn dictation_capsule(
                 );
                 let cancel = ui.interact(
                     cancel_rect,
-                    ui.id().with("openless-capsule-cancel"),
+                    ui.scope_id().with("openless-capsule-cancel"),
                     egui::Sense::click(),
                 );
                 let cancel_fill = if typeless {
@@ -170,7 +170,7 @@ pub fn dictation_capsule(
                 );
                 let confirm = ui.interact(
                     confirm_rect,
-                    ui.id().with("openless-capsule-confirm"),
+                    ui.scope_id().with("openless-capsule-confirm"),
                     egui::Sense::click(),
                 );
                 let (confirm_fill, confirm_ink) = if typeless {
