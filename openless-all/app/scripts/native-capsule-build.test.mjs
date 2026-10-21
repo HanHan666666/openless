@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import yaml from 'js-yaml';
 
 const scriptUrl = new URL('./build-native-capsule.mjs', import.meta.url);
 const script = readFileSync(scriptUrl, 'utf8')
@@ -77,6 +78,25 @@ for (const platform of ['macos', 'windows']) {
   }
   assert.ok(config.bundle.externalBin.includes('binaries/openless-native-capsule'));
 }
+const ci = yaml.load(
+  readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'),
+);
+for (const job of ['cross-platform', 'macos-msrv']) {
+  const steps = ci.jobs[job].steps;
+  const helperBuild = steps.findIndex((step) => step.run === 'npm run build:native-capsule:dev');
+  const hostBuild = steps.findIndex((step) =>
+    /cargo[^\n]*--manifest-path src-tauri\/Cargo.toml/.test(step.run ?? ''),
+  );
+  assert.ok(
+    helperBuild >= 0 && helperBuild < hostBuild,
+    job + ' must build the real externalBin before compiling Tauri',
+  );
+  assert.equal(
+    steps[helperBuild].if,
+    undefined,
+    job + ' must prepare the helper on every desktop platform',
+  );
+}
 console.log(
-  'native capsule build: output directories, target selection and platform build hooks passed',
+  'native capsule build: output directories, target selection, platform hooks and CI prerequisites passed',
 );
